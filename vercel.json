@@ -6,5 +6,19 @@
     { "source": "/jira/createmeta",   "destination": "/api/jira/createmeta" },
     { "source": "/jira/users",        "destination": "/api/jira/users" },
     { "source": "/jira/create",       "destination": "/api/jira/create" }
+  ],
+  "headers": [
+    {
+      "source": "/",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/index.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
+    }
   ]
 }
