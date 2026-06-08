@@ -145,7 +145,17 @@ Login form on a web app. Fields: email (required, valid format), password (requi
               <div class="flex-1 min-w-0">
                 <div id="screenshotName" class="text-xs font-medium text-slate-700 truncate"></div>
                 <div id="screenshotMeta" class="text-[10px] text-slate-500"></div>
-                <button type="button" id="btnRemoveScreenshot" class="pointer-events-auto mt-1.5 text-[10px] text-rose-600 hover:text-rose-800 font-semibold">Remove</button>
+                <!-- `relative z-10` lifts this button above the
+                     `absolute inset-0` file input that covers the whole
+                     drop zone — otherwise clicks land on the file input
+                     and the file-picker opens instead of removing the
+                     image. `inline-flex` + padding + border give it a
+                     proper hit target so it actually feels clickable. -->
+                <button type="button" id="btnRemoveScreenshot"
+                  class="pointer-events-auto relative z-10 mt-1.5 inline-flex items-center gap-1 text-[11px] text-rose-700 hover:text-white hover:bg-rose-600 border border-rose-300 hover:border-rose-600 font-semibold px-2 py-0.5 rounded transition">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  Remove
+                </button>
               </div>
             </div>
           </div>
@@ -4476,7 +4486,7 @@ function computeHistoryCounts(cases) {
   return { total: (cases || []).length, byType, byStatus };
 }
 
-function buildHistoryEntry(description, module, platform, engineKey, cases) {
+function buildHistoryEntry(description, module, platform, engineKey, cases, extras) {
   const friendlyEngine = engineKey === "gemini" ? "Gemini"
                        : engineKey === "openai" ? "OpenAI"
                        : "Demo";
@@ -4488,13 +4498,25 @@ function buildHistoryEntry(description, module, platform, engineKey, cases) {
   } catch {
     id = Date.now() + "_" + Math.random().toString(36).slice(2, 10);
   }
+  // Defensive: extras may be undefined for older call sites. We persist the
+  // full set of generation inputs (text, module, platform, depth, audience,
+  // engine key + Playwright config) so that restoring a Recent suite can
+  // repopulate every form field — not just the test-case table. We do NOT
+  // persist screenshots: they're potentially MB-sized and easy for the user
+  // to re-attach if needed; storing them would bloat localStorage quickly.
+  const e = extras || {};
   return {
     id,
     timestamp: Date.now(),
     module: module || "",
     platform: platform || "",
-    engine: friendlyEngine,
-    description: String(description || "").slice(0, 400),
+    engine: friendlyEngine,        // friendly label kept for display
+    engineKey: engineKey || "demo", // raw key used when restoring the <select>
+    description: String(description || "").slice(0, 4000),
+    depth: e.depth || "",
+    audience: e.audience || "",
+    automationOn: !!e.automationOn,
+    automationLang: e.automationLang || null,
     counts: computeHistoryCounts(cases),
     cases: (cases || []).map(sanitizeCaseForHistory),
   };
@@ -4655,9 +4677,13 @@ function renderHistoryDropdown() {
   }
 }
 
-/* Restore a history entry into the current view. ONLY touches cases + meta —
-   never re-runs AI calls, never overwrites the feature-description input or
-   any settings. */
+/* Restore a history entry into the current view. Rehydrates BOTH the test
+   case table AND the form inputs that produced it (description, module,
+   platform, depth, audience, engine, Playwright config) so users can tweak
+   one field and re-run without re-typing the whole prompt. We deliberately
+   do NOT touch the screenshot input — screenshots aren't persisted (too
+   large for localStorage) and any currently-attached one was probably
+   intended for a different generation. API keys are never touched. */
 function loadHistoryEntry(id) {
   const entry = loadHistory().find(e => e.id === id);
   if (!entry) return;
@@ -4665,7 +4691,16 @@ function loadHistoryEntry(id) {
   const sameAsCurrent = currentSuiteId === entry.id;
   const hasOtherView  = currentCases.length > 0 && !sameAsCurrent;
 
+  // Backwards-compat: older history entries stored only the friendly engine
+  // name ("Gemini"/"OpenAI"/"Demo"). Newer ones also store the raw key. Map
+  // whichever is available to the select-element value.
+  const engineKeyFromEntry = entry.engineKey
+    || (entry.engine === "Gemini" ? "gemini"
+      : entry.engine === "OpenAI" ? "openai"
+      : "demo");
+
   const doLoad = () => {
+    // ── 1. Restore the test case table ───────────────────────────────────
     currentCases = (entry.cases || []).map(c => ({ ...c }));
     currentCases.forEach(c => { c.status = normalizeCaseStatus(c.status); });
     currentMeta = {
@@ -4676,9 +4711,50 @@ function loadHistoryEntry(id) {
     };
     currentSuiteId = entry.id;
 
+    // ── 2. Repopulate the form inputs ────────────────────────────────────
+    // Use a small helper so we only write a field if BOTH the element
+    // exists AND the entry has a value for it (old entries pre-dating
+    // this feature won't have depth/audience/automation* — we leave the
+    // current values alone in that case rather than clobbering with empty).
+    const setIf = (id, val) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (val === undefined || val === null || val === "") return;
+      el.value = val;
+      // Notify any listeners (engine-quick-pill sync, automation hint
+      // panels, validation styling, etc.) that the value changed
+      // programmatically — they're wired to "change", not "input".
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    setIf("featureInput",  entry.description);
+    setIf("moduleInput",   entry.module);
+    setIf("platformInput", entry.platform);
+    setIf("depthInput",    entry.depth);
+    setIf("audienceInput", entry.audience);
+    setIf("engineInput",   engineKeyFromEntry);
+
+    // Playwright automation: toggle + language. Only touch these when the
+    // entry actually carries the flag (again — old entries don't).
+    if (typeof entry.automationOn === "boolean") {
+      const toggle = document.getElementById("genAutomationToggle");
+      if (toggle) {
+        toggle.checked = entry.automationOn;
+        toggle.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (entry.automationOn && entry.automationLang) {
+        const langSel = document.getElementById("automationLangInput");
+        if (langSel) {
+          langSel.value = entry.automationLang;
+          langSel.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }
+    }
+
+    // ── 3. Refresh derived UI ─────────────────────────────────────────────
     renderResults();
     refreshExecutionSummary();
     setExportEnabled(true);
+    if (typeof refreshVisionBadge === "function") refreshVisionBadge();
 
     const tableHost = document.getElementById("resultsTbody");
     const card = tableHost && tableHost.closest(".bg-white");
@@ -5146,9 +5222,14 @@ function setGenerateBusy(busy) {
 let lastGenFingerprint = null;
 let bypassDuplicateCheckOnce = false;
 function currentGenFingerprint(o) {
-  // Screenshots are large base64 data URLs; a length+tail signature is enough
-  // to detect "user swapped the screenshot" without hashing megabytes.
-  const imgSig = o.image ? (o.image.length + ":" + o.image.slice(-48)) : "";
+  // The screenshot is an OBJECT { base64, mimeType, name, sizeKB }, not a
+  // string — calling .length / .slice on it throws and crashes the click
+  // handler (which is why generation used to silently fail whenever a
+  // screenshot was attached). name + size + mime uniquely identifies any
+  // user-uploaded image without us having to fingerprint the base64 payload.
+  const imgSig = o.image
+    ? `${o.image.name || ""}:${o.image.sizeKB || 0}:${o.image.mimeType || ""}`
+    : "";
   return [
     (o.text || "").trim(),
     (o.module || "").trim(),
@@ -5291,7 +5372,11 @@ on("btnGenerate", "click", async () => {
     // never saved. Toggle in Settings disables this without clearing existing
     // entries.
     if (historyEnabled()) {
-      const entry = buildHistoryEntry(text, module, platform, engine, cases);
+      const entry = buildHistoryEntry(text, module, platform, engine, cases, {
+        depth, audience,
+        automationOn: withAutomation,
+        automationLang: withAutomation ? automationLang : null
+      });
       addToHistory(entry);
       currentSuiteId = entry.id;
       renderHistoryDropdown();
