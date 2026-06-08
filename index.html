@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%234f46e5'><path d='M13 2L3 14h9l-1 8 10-12h-9l1-8z'/></svg>" />
 <title>TestCase Genius — AI-powered Test Case Generator for QA</title>
 <meta name="description" content="Generate diverse manual test cases with rationale and export to Excel/CSV/Markdown/JSON." />
 <script src="https://cdn.tailwindcss.com"></script>
@@ -537,8 +538,8 @@ Login form on a web app. Fields: email (required, valid format), password (requi
     <hr class="my-5 border-slate-200" />
 
     <h4 id="settingsSectionJira" class="text-xs uppercase tracking-wide text-slate-500 font-semibold mb-2 scroll-mt-2">Jira Integration <span class="text-slate-400 normal-case font-normal">(optional)</span></h4>
-    <div class="bg-sky-50 border border-sky-200 rounded-lg p-3 text-[11px] text-sky-900 mb-3">
-      <strong>How it works:</strong> The browser blocks direct calls to Jira (CORS), so the app talks to a tiny local proxy. Run it once with <code class="bg-white border border-sky-200 px-1 rounded">node server.js</code> in the project folder. Then click <strong>Push to Jira</strong>.
+    <div id="jiraHowItWorks" class="bg-sky-50 border border-sky-200 rounded-lg p-3 text-[11px] text-sky-900 mb-3">
+      <strong>How it works:</strong> The browser blocks direct calls to Jira (CORS), so the app routes them through a tiny proxy. <span id="jiraHowItWorksDetail">Loading…</span>
     </div>
     <label class="text-xs block">
       <span class="block text-slate-600 mb-1">Jira Site URL</span>
@@ -560,7 +561,14 @@ Login form on a web app. Fields: email (required, valid format), password (requi
         </div>
       </label>
     </div>
-    <div class="grid grid-cols-3 gap-3 mt-3">
+    <!-- 4-column grid with weighted spans: Project Key (1) + Issue Type (1)
+         + Proxy URL (2). Proxy URL gets the larger share because its value
+         is naturally longer (e.g. "http://localhost:7777" — 21 chars — was
+         being truncated to "http://localhost:777" in the old equal-thirds
+         layout). `items-end` aligns the input rows at the bottom of each
+         cell so the Project Key label wrapping to two lines no longer
+         knocks its input out of line with the other two. -->
+    <div class="grid grid-cols-4 gap-3 mt-3 items-end">
       <label class="text-xs block">
         <span class="block text-slate-600 mb-1">Project Key <span class="text-slate-400 font-normal">(prefix only, e.g. <code class="bg-slate-100 px-1 rounded">QA</code> not <code class="bg-slate-100 px-1 rounded">QA-123</code>)</span></span>
         <input id="jiraProjectInput" placeholder="QA" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm uppercase" />
@@ -576,9 +584,9 @@ Login form on a web app. Fields: email (required, valid format), password (requi
           <option value="Bug">Bug</option>
         </select>
       </label>
-      <label class="text-xs block">
-        <span class="block text-slate-600 mb-1">Proxy URL</span>
-        <input id="jiraProxyInput" placeholder="http://localhost:7777" value="http://localhost:7777" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+      <label class="text-xs block col-span-2">
+        <span class="block text-slate-600 mb-1">Proxy URL <span id="jiraProxyHint" class="text-slate-400 normal-case font-normal"></span></span>
+        <input id="jiraProxyInput" placeholder="" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
       </label>
     </div>
     <div class="grid grid-cols-2 gap-3 mt-3">
@@ -2173,7 +2181,7 @@ function openDetail(idx) {
 }
 
 function escapeHtml(s) { return String(s ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[ch])); }
-function setExportEnabled(on) { ["btnXLSX","btnCSV","btnMD","btnJSON","btnJiraCSV","btnPlaywright","btnJiraPush","btnExportMenu"].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !on; }); }
+function setExportEnabled(on) { ["btnJiraCSV","btnPlaywright","btnJiraPush","btnExportMenu"].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !on; }); }
 
 /* ===============================================================
  *  EXPORTS
@@ -3112,16 +3120,53 @@ function buildJiraWikiDescription(c) {
 }
 
 /* ===============================================================
- *  PUSH TO JIRA (via local proxy)  — server.js
+ *  PUSH TO JIRA — two backend modes:
+ *    1) BUILT-IN  (deployed site): Vercel serverless functions under
+ *       /api/jira/*, aliased to /jira/* via vercel.json rewrites. Zero
+ *       setup for end users — the static page just hits its own origin
+ *       with relative paths (cfg.proxy === "").
+ *    2) LOCAL     (dev / file://): the user runs `node server.js` which
+ *       hosts the same endpoints on http://localhost:7777. Used when
+ *       the page is opened locally and there are no serverless
+ *       functions to call.
  * =============================================================== */
+
+/**
+ * Does the page have a built-in (same-origin) Jira proxy available?
+ * True iff we're served from an HTTP(S) origin that ISN'T localhost —
+ * i.e. a deployed environment where /api/jira/* serverless functions
+ * are reachable via relative URLs. file:// and localhost both return
+ * false (no backend to fall back on).
+ */
+function hasBuiltInProxy() {
+  if (typeof location === "undefined") return false;
+  if (location.protocol === "file:")   return false;
+  const host = location.hostname || "";
+  return !(host === "localhost" || host === "127.0.0.1");
+}
+
+/**
+ * Default Jira proxy URL based on where the page is hosted. Empty string
+ * means "use relative paths (same origin)". The local default is the
+ * canonical port server.js listens on.
+ */
+function defaultJiraProxyUrl() {
+  return hasBuiltInProxy() ? "" : "http://localhost:7777";
+}
+
 function jiraConfig() {
+  // `??` (not `||`) so a user who explicitly clears the field to "" on a
+  // deployed site keeps the built-in (relative-path) proxy — only a
+  // never-set value falls through to the smart default.
+  const savedProxy = localStorage.getItem("tg_jiraProxy");
+  const proxyRaw = (savedProxy !== null ? savedProxy : defaultJiraProxyUrl());
   return {
     jiraUrl:   (localStorage.getItem("tg_jiraUrl") || "").trim().replace(/\/$/, ""),
     email:     (localStorage.getItem("tg_jiraEmail") || "").trim(),
     apiToken:  (localStorage.getItem("tg_jiraToken") || "").trim(),
     project:   (localStorage.getItem("tg_jiraProject") || "").trim().toUpperCase(),
     issueType: (localStorage.getItem("tg_jiraIssueType") || "Task").trim(),
-    proxy:     (localStorage.getItem("tg_jiraProxy") || "http://localhost:7777").trim().replace(/\/$/, ""),
+    proxy:     proxyRaw.trim().replace(/\/$/, ""),
     epic:      (localStorage.getItem("tg_jiraEpic") || "").trim().toUpperCase(),
     labels:    (localStorage.getItem("tg_jiraLabels") || "").split(",").map(s => s.trim()).filter(Boolean),
     assigneeAccountId:  (localStorage.getItem("tg_jiraAssigneeId")   || "").trim(),
@@ -3135,7 +3180,10 @@ function validateJiraConfig(cfg) {
   if (!cfg.email)     missing.push("Email");
   if (!cfg.apiToken)  missing.push("API Token");
   if (!cfg.project)   missing.push("Project Key");
-  if (!cfg.proxy)     missing.push("Proxy URL");
+  // Proxy URL is only "missing" when we have NO way to reach Jira: no
+  // explicit value AND no built-in serverless functions to fall back on
+  // (i.e. user opened the file locally without running `node server.js`).
+  if (!cfg.proxy && !hasBuiltInProxy()) missing.push("Proxy URL");
   return missing;
 }
 
@@ -3441,7 +3489,9 @@ async function testJiraConnection() {
   }
   const proxyUp = await jiraProxyHealth(cfg);
   if (!proxyUp) {
-    result.innerHTML = `Proxy not reachable. Run <code class="bg-slate-100 px-1 rounded">node server.js</code> in the project folder.`;
+    result.innerHTML = hasBuiltInProxy()
+      ? `Built-in proxy unreachable — please retry; if it persists, redeploy from your Vercel dashboard.`
+      : `Proxy not reachable. Run <code class="bg-slate-100 px-1 rounded">node server.js</code> in the project folder.`;
     result.className = "text-xs ml-2 text-rose-600"; return;
   }
   try {
@@ -3809,7 +3859,11 @@ function attachAssigneePicker(opts) {
   }
   async function runSearch() {
     const q = input.value.trim();
-    if (!cfg.proxy || !cfg.jiraUrl || !cfg.email || !cfg.apiToken || !cfg.project) {
+    // Empty cfg.proxy is FINE on a deployed site (we use relative paths
+    // that hit the built-in serverless functions). Only fail when there
+    // truly is no proxy reachable.
+    const proxyMissing = !cfg.proxy && !hasBuiltInProxy();
+    if (proxyMissing || !cfg.jiraUrl || !cfg.email || !cfg.apiToken || !cfg.project) {
       if (helper) helper.innerHTML = '<span class="text-rose-600">Configure Jira settings before searching for users.</span>';
       return;
     }
@@ -3830,7 +3884,9 @@ function attachAssigneePicker(opts) {
         })
       });
       if (r.status === 404) {
-        results.innerHTML = '<div class="px-3 py-2 text-xs text-amber-700">Restart the proxy (<code class="bg-slate-100 px-1 rounded">node server.js</code>) — the assignee search endpoint is new.</div>';
+        results.innerHTML = hasBuiltInProxy()
+          ? '<div class="px-3 py-2 text-xs text-amber-700">Built-in proxy is missing the assignee endpoint — redeploy from your Vercel dashboard.</div>'
+          : '<div class="px-3 py-2 text-xs text-amber-700">Restart the proxy (<code class="bg-slate-100 px-1 rounded">node server.js</code>) — the assignee search endpoint is new.</div>';
         return;
       }
       const data = await r.json();
@@ -3886,12 +3942,27 @@ async function actuallyPush(cfg, casesToPush) {
   const cases = (Array.isArray(casesToPush) && casesToPush.length) ? casesToPush : currentCases;
   const proxyUp = await jiraProxyHealth(cfg);
   if (!proxyUp) {
-    openPushModal("Local proxy not running", `
-      <p>The browser cannot call Jira directly (CORS). Start the proxy in a terminal:</p>
-      <pre class="bg-slate-900 text-slate-100 p-3 rounded text-xs overflow-auto">cd "${escapeHtml(window.location.pathname.split("/").slice(0, -1).join("/") || ".")}"
+    if (hasBuiltInProxy()) {
+      // Deployed site — built-in serverless functions should always be
+      // reachable. If they aren't, it's a transient deploy issue (cold
+      // start failed, function quota, etc.) not something the user can
+      // fix by running a local server.
+      openPushModal("Built-in Jira proxy unreachable", `
+        <p>The site's built-in Jira proxy isn't responding right now. This is usually a transient deploy issue.</p>
+        <ul class="text-xs text-slate-600 list-disc pl-5 space-y-1">
+          <li>Wait a few seconds and click <strong>Push to Jira</strong> again.</li>
+          <li>If it keeps failing, redeploy from your Vercel dashboard to wake the functions back up.</li>
+        </ul>
+        <p class="text-[11px] text-slate-400 mt-2">Endpoint that failed health check: <code>${escapeHtml((cfg.proxy || "") + "/health")}</code></p>
+      `, [{ label: "Got it", primary: true, onClick: closePushModal }]);
+    } else {
+      openPushModal("Local proxy not running", `
+        <p>The browser cannot call Jira directly (CORS). Start the proxy in a terminal:</p>
+        <pre class="bg-slate-900 text-slate-100 p-3 rounded text-xs overflow-auto">cd "${escapeHtml(window.location.pathname.split("/").slice(0, -1).join("/") || ".")}"
 node server.js</pre>
-      <p class="text-xs text-slate-500">No npm install needed. Requires Node.js 18+. The proxy listens on ${escapeHtml(cfg.proxy)}.</p>
-    `, [{ label: "Got it", primary: true, onClick: closePushModal }]);
+        <p class="text-xs text-slate-500">No npm install needed. Requires Node.js 18+. The proxy listens on ${escapeHtml(cfg.proxy)}.</p>
+      `, [{ label: "Got it", primary: true, onClick: closePushModal }]);
+    }
     return;
   }
 
@@ -3924,10 +3995,11 @@ node server.js</pre>
 
   if (meta.status === 404 && /not found|route/i.test(JSON.stringify(meta.body || {}))) {
     const proceed = await new Promise(resolve => {
-      openPushModal("Proxy needs restart", `
-        <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900 mb-3">
-          Your <code class="bg-white border border-amber-200 px-1 rounded">server.js</code> is an older version that doesn't support pre-flight validation. Stop it (Ctrl+C in the terminal) and run <code class="bg-white border border-amber-200 px-1 rounded">node server.js</code> again.
-        </div>
+      const fixMsg = hasBuiltInProxy()
+        ? `The built-in proxy is missing the <code class="bg-white border border-amber-200 px-1 rounded">/jira/createmeta</code> endpoint. Redeploy from your Vercel dashboard to ship the latest serverless functions.`
+        : `Your <code class="bg-white border border-amber-200 px-1 rounded">server.js</code> is an older version that doesn't support pre-flight validation. Stop it (Ctrl+C in the terminal) and run <code class="bg-white border border-amber-200 px-1 rounded">node server.js</code> again.`;
+      openPushModal("Proxy needs an update", `
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900 mb-3">${fixMsg}</div>
         <p class="text-xs text-slate-600">You can also skip validation and push anyway — but any config error will cause every case to fail.</p>
       `, [
         { label: "Cancel", onClick: () => { resolve(false); closePushModal(); } },
@@ -5284,15 +5356,12 @@ on("btnGenerate", "click", async () => {
 on("filterType", "change", renderResults);
 on("filterPriority", "change", renderResults);
 
-on("btnXLSX", "click", exportXLSX);
-on("btnCSV", "click", exportCSV);
-on("btnMD", "click", exportMD);
-on("btnJSON", "click", exportJSON);
 on("btnJiraCSV", "click", exportJiraCSV);
 
 // Export dropdown: toggles the menu and dispatches the four file-format exports.
-// The original per-format button IDs are kept (and still wired above) so any
-// programmatic callers / tests aren't broken — the dropdown is purely a UI layer.
+// The four per-format buttons (#btnXLSX/#btnCSV/#btnMD/#btnJSON) were folded
+// into this dropdown; the only entry point now is the [data-export] handler
+// below, which calls the export* functions directly.
 //
 // IMPORTANT — accidental-trigger defense:
 //   The menu opens directly under the user's cursor. Without protection, two
@@ -5416,7 +5485,25 @@ function openSettings(section) {
   document.getElementById("jiraTokenInput").value   = localStorage.getItem("tg_jiraToken") || "";
   document.getElementById("jiraProjectInput").value = localStorage.getItem("tg_jiraProject") || "";
   document.getElementById("jiraIssueTypeInput").value = localStorage.getItem("tg_jiraIssueType") || "Task";
-  document.getElementById("jiraProxyInput").value   = localStorage.getItem("tg_jiraProxy") || "http://localhost:7777";
+  // Proxy URL: respect the user's explicit choice (including ""), only
+  // fall through to the hosting-aware default when never set.
+  const _savedProxy = localStorage.getItem("tg_jiraProxy");
+  const _proxyInput = document.getElementById("jiraProxyInput");
+  _proxyInput.value = _savedProxy !== null ? _savedProxy : defaultJiraProxyUrl();
+  _proxyInput.placeholder = hasBuiltInProxy()
+    ? "leave blank to use the built-in proxy"
+    : "http://localhost:7777";
+  const _proxyHint = document.getElementById("jiraProxyHint");
+  if (_proxyHint) _proxyHint.textContent = hasBuiltInProxy()
+    ? "— blank = built-in"
+    : "— start node server.js first";
+  // "How it works" banner: tell the user which proxy mode applies right now.
+  const _howDetail = document.getElementById("jiraHowItWorksDetail");
+  if (_howDetail) {
+    _howDetail.innerHTML = hasBuiltInProxy()
+      ? `On this deployed site the proxy is <strong>built-in</strong> — no local setup needed. Just fill in your Jira URL, email and API token above, then click <strong>Push to Jira</strong> from the test cases view.`
+      : `You're running the page locally, so start the proxy once with <code class="bg-white border border-sky-200 px-1 rounded">node server.js</code> in the project folder, then click <strong>Push to Jira</strong>.`;
+  }
   document.getElementById("jiraEpicInput").value    = localStorage.getItem("tg_jiraEpic") || "";
   document.getElementById("jiraLabelsInput").value  = localStorage.getItem("tg_jiraLabels") || "";
   document.getElementById("jiraTestResult").textContent = "";

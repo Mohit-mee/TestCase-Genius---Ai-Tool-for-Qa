@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/health",            "destination": "/api/health" },
+    { "source": "/jira/myself",       "destination": "/api/jira/myself" },
+    { "source": "/jira/createmeta",   "destination": "/api/jira/createmeta" },
+    { "source": "/jira/users",        "destination": "/api/jira/users" },
+    { "source": "/jira/create",       "destination": "/api/jira/create" }
+  ]
+}
