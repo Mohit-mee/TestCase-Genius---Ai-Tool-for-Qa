@@ -4600,45 +4600,30 @@ function renderHistoryDropdown() {
     const pass  = byStatus.Pass  || 0;
     const fail  = byStatus.Fail  || 0;
     const total = counts.total || (e.cases || []).length;
-    const isActive   = activeId && e.id === activeId;
-    // During generation no row is loadable (see comment on `generating`
-    // above), so the active row is also marked locked. We still surface
-    // the "Loaded" badge so the user can see which entry the in-flight
-    // run is overwriting.
-    const isLocked   = (suiteLoaded || generating) && (!isActive || generating);
+    // Once a suite is on screen OR a generation is in flight, ALL rows
+    // are uniformly locked — no special treatment for the entry that
+    // happens to be loaded. This is intentional: any in-place reload
+    // would silently discard local status edits and confuse the user
+    // about whether they're looking at saved data or unsaved progress.
+    // Generate is the single path to swap what's on screen.
+    const isLocked   = suiteLoaded || generating;
 
-    // Visual / behaviour treatment per state:
-    //  - isActive: highlighted with an indigo "Loaded" badge so the user
-    //              can see WHICH entry is on screen. Cursor is `default`
-    //              and clicks only produce an info toast — clicking the
-    //              loaded row no longer reloads (and silently discards
-    //              local status edits). Generate is the single path to
-    //              swap what's on screen.
-    //  - isLocked: dimmed + cursor-not-allowed + lock icon, no click handler
-    //              wired up below. Tooltip explains how to unlock.
-    //  - default:  normal clickable row.
-    const rowClasses = isActive
-      ? "bg-indigo-50/60 border-l-2 border-l-indigo-500 hover:bg-indigo-50 cursor-default"
-      : isLocked
-        ? "opacity-60 cursor-not-allowed bg-slate-50/60"
-        : "hover:bg-slate-50 cursor-pointer";
+    const rowClasses = isLocked
+      ? "opacity-60 cursor-not-allowed bg-slate-50/60"
+      : "hover:bg-slate-50 cursor-pointer";
 
-    const stateBadge = isActive
-      ? `<span class="ml-2 text-[9px] font-bold uppercase tracking-wide bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded shrink-0">Loaded</span>`
-      : isLocked
-        ? `<span class="ml-2 inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 shrink-0" title="A suite is currently loaded. Generate new cases to switch.">
-             <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-             Locked
-           </span>`
-        : "";
+    const stateBadge = isLocked
+      ? `<span class="ml-2 inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 shrink-0">
+           <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+           Locked
+         </span>`
+      : "";
 
     const rowTitle = generating
       ? "Wait for the current generation to finish before loading another suite"
       : isLocked
-        ? "Generate new cases (overwrites in place) to load a different saved suite"
-        : isActive
-          ? "This suite is currently on screen"
-          : "Load this suite";
+        ? "Generate new cases to load a different saved suite"
+        : "Load this suite";
 
     return `
       <div data-history-id="${escapeHtml(e.id)}"
@@ -4696,7 +4681,7 @@ function renderHistoryDropdown() {
     ${lockBanner}
     <div class="max-h-80 overflow-auto scroll-thin">${rows}</div>
     <div class="border-t border-slate-100 px-3 py-2 flex items-center justify-between bg-slate-50/50">
-      <span class="text-[10px] text-slate-400">Stored locally · max 5</span>
+      <span class="text-[10px] text-slate-400">Stored locally · max 5 · lock v3</span>
       <button type="button" id="historyClearAll" class="text-[11px] text-rose-600 hover:text-rose-800 font-semibold">Clear all</button>
     </div>
   `;
@@ -4716,15 +4701,12 @@ function renderHistoryDropdown() {
         toast("Wait for the current generation to finish before loading another suite.");
         return;
       }
-      if (liveSuiteLoaded && id !== currentSuiteId) {
+      // Recent is uniformly view-only while ANY suite is on screen — the
+      // loaded entry has no special affordance. Generate is the only path
+      // to swap what's displayed. This single guard covers the active
+      // entry AND any other entry the user might click.
+      if (liveSuiteLoaded) {
         toast("Generate new cases to load a different saved suite.");
-        return;
-      }
-      // Loaded row is now view-only: clicking it MUST NOT reload (which
-      // would silently discard local status edits the user has made since
-      // the suite was loaded). Generate is the only path to swap suites.
-      if (liveSuiteLoaded && id === currentSuiteId) {
-        toast("This suite is already loaded. Generate new cases to replace it.");
         return;
       }
       if (row.dataset.rowLocked === "1") return;
@@ -4804,16 +4786,13 @@ function loadHistoryEntry(id) {
     toast("Wait for the current generation to finish before loading another suite.");
     return;
   }
-  const liveSuiteLoaded = Array.isArray(currentCases) && currentCases.length > 0;
-  if (liveSuiteLoaded && currentSuiteId !== entry.id) {
+  // Any suite on screen blocks ALL loads — including same-suite reloads.
+  // Same-suite reload would silently discard local status edits; different-
+  // suite load would erase the in-progress view. Generate is the single
+  // path to mutate the on-screen suite. The check uses currentCases.length
+  // (not currentSuiteId) so the lock holds even if currentSuiteId drifts.
+  if (Array.isArray(currentCases) && currentCases.length > 0) {
     toast("Generate new cases to load a different saved suite.");
-    return;
-  }
-  // Same-suite reload is no longer a supported affordance — even programmatic
-  // callers shouldn't silently overwrite local status edits. Generate is the
-  // single path to mutate the on-screen suite.
-  if (liveSuiteLoaded && currentSuiteId === entry.id) {
-    toast("This suite is already loaded.");
     return;
   }
 
