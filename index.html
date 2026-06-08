@@ -4579,57 +4579,17 @@ function renderHistoryDropdown() {
     return;
   }
 
-  // Lock state: once any suite is on screen, Recent becomes view-only —
-  // NO click on any row can mutate the on-screen suite. This prevents a
-  // class of conflicts where users edited statuses / pushed to Jira from
-  // one suite, then accidentally overwrote the meta (or silently discarded
-  // local status edits) by re-loading the same suite or loading another.
-  // Generate is the single path to swap what's on screen.
-  //
-  // We also treat an in-flight Generate as a locked state: loading from
-  // history while the AI call is mid-air leaves the form + button in an
-  // inconsistent state (button stuck on "Generating…" while a different
-  // suite shows in the table).
-  const suiteLoaded = Array.isArray(currentCases) && currentCases.length > 0;
-  const generating  = typeof isGenerating !== "undefined" && isGenerating;
-  const activeId    = currentSuiteId || null;
-
   const rows = items.map(e => {
     const counts = e.counts || {};
     const byStatus = counts.byStatus || {};
     const pass  = byStatus.Pass  || 0;
     const fail  = byStatus.Fail  || 0;
     const total = counts.total || (e.cases || []).length;
-    // Once a suite is on screen OR a generation is in flight, ALL rows
-    // are uniformly locked — no special treatment for the entry that
-    // happens to be loaded. This is intentional: any in-place reload
-    // would silently discard local status edits and confuse the user
-    // about whether they're looking at saved data or unsaved progress.
-    // Generate is the single path to swap what's on screen.
-    const isLocked   = suiteLoaded || generating;
-
-    const rowClasses = isLocked
-      ? "opacity-60 cursor-not-allowed bg-slate-50/60"
-      : "hover:bg-slate-50 cursor-pointer";
-
-    const stateBadge = isLocked
-      ? `<span class="ml-2 inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 shrink-0">
-           <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-           Locked
-         </span>`
-      : "";
-
-    const rowTitle = generating
-      ? "Wait for the current generation to finish before loading another suite"
-      : isLocked
-        ? "Generate new cases to load a different saved suite"
-        : "Load this suite";
 
     return `
       <div data-history-id="${escapeHtml(e.id)}"
-           data-row-locked="${isLocked ? "1" : "0"}"
-           title="${escapeHtml(rowTitle)}"
-           class="historyRow group relative px-3 py-2.5 border-b border-slate-100 last:border-b-0 ${rowClasses}">
+           title="Load this suite"
+           class="historyRow group relative px-3 py-2.5 border-b border-slate-100 last:border-b-0 hover:bg-slate-50 cursor-pointer">
         <div class="pr-6">
           <div class="text-xs font-semibold text-slate-800 truncate flex items-center">
             <span class="truncate">
@@ -4637,7 +4597,6 @@ function renderHistoryDropdown() {
               <span class="text-slate-400"> · </span>
               <span class="text-slate-600 font-normal">${escapeHtml(e.platform || "")}</span>
             </span>
-            ${stateBadge}
           </div>
           <div class="text-[11px] mt-0.5">
             <span class="text-slate-700">${total} case${total === 1 ? "" : "s"}</span>
@@ -4665,23 +4624,10 @@ function renderHistoryDropdown() {
     `;
   }).join("");
 
-  // Banner at the top of the menu — sets expectations BEFORE they click
-  // a locked row. The generating-state copy is distinct so the user knows
-  // the lock is temporary (it lifts when the in-flight run finishes).
-  const lockBanner = (suiteLoaded || generating)
-    ? `<div class="px-3 py-2 bg-amber-50 border-b border-amber-200 text-[11px] text-amber-900 flex items-start gap-2">
-         <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-         <span>${generating
-           ? "Generation in progress — history switching is paused until it finishes."
-           : "A suite is on screen. Generate new cases to replace it — Recent is view-only while one is loaded."}</span>
-       </div>`
-    : "";
-
   menu.innerHTML = `
-    ${lockBanner}
     <div class="max-h-80 overflow-auto scroll-thin">${rows}</div>
     <div class="border-t border-slate-100 px-3 py-2 flex items-center justify-between bg-slate-50/50">
-      <span class="text-[10px] text-slate-400">Stored locally · max 5 · lock v3</span>
+      <span class="text-[10px] text-slate-400">Stored locally · max 5</span>
       <button type="button" id="historyClearAll" class="text-[11px] text-rose-600 hover:text-rose-800 font-semibold">Clear all</button>
     </div>
   `;
@@ -4689,28 +4635,7 @@ function renderHistoryDropdown() {
   menu.querySelectorAll(".historyRow").forEach(row => {
     row.addEventListener("click", (ev) => {
       if (ev.target.closest(".historyDelete")) return;
-      const id = row.dataset.historyId;
-      // Final guard: re-read live state at click time. data-row-locked is
-      // a snapshot from the last render and can go stale — e.g. the dropdown
-      // was rendered when currentCases was empty (fresh page, mid-generate),
-      // then state changed before the user actually clicked. Always block
-      // here if a different suite is on screen, OR a generation is in flight.
-      const liveSuiteLoaded = Array.isArray(currentCases) && currentCases.length > 0;
-      const liveGenerating  = typeof isGenerating !== "undefined" && isGenerating;
-      if (liveGenerating) {
-        toast("Wait for the current generation to finish before loading another suite.");
-        return;
-      }
-      // Recent is uniformly view-only while ANY suite is on screen — the
-      // loaded entry has no special affordance. Generate is the only path
-      // to swap what's displayed. This single guard covers the active
-      // entry AND any other entry the user might click.
-      if (liveSuiteLoaded) {
-        toast("Generate new cases to load a different saved suite.");
-        return;
-      }
-      if (row.dataset.rowLocked === "1") return;
-      loadHistoryEntry(id);
+      loadHistoryEntry(row.dataset.historyId);
     });
   });
   menu.querySelectorAll(".historyDelete").forEach(btn => {
@@ -4767,34 +4692,6 @@ function renderHistoryDropdown() {
 function loadHistoryEntry(id) {
   const entry = loadHistory().find(e => e.id === id);
   if (!entry) return;
-
-  // Hard lock — runs FIRST, before any other state read or mutation, so it
-  // can't be undone by a later code path or skipped by a stale dropdown
-  // attribute. Three conditions block the load:
-  //   1. A Generate call is in flight — loading mid-flight leaves the UI
-  //      in an inconsistent state (button stuck on "Generating…" while a
-  //      different suite shows in the table).
-  //   2. A different suite is on screen — would clobber status edits /
-  //      Jira push state on the previous suite. We rely on
-  //      currentCases.length > 0 as the fallback signal so the lock still
-  //      works even if currentSuiteId drifts out of sync.
-  //   3. The SAME suite is on screen — re-loading silently discards local
-  //      status edits, which the user has no way to recover. Generate is
-  //      the single supported path to refresh / replace what's on screen.
-  const generating = typeof isGenerating !== "undefined" && isGenerating;
-  if (generating) {
-    toast("Wait for the current generation to finish before loading another suite.");
-    return;
-  }
-  // Any suite on screen blocks ALL loads — including same-suite reloads.
-  // Same-suite reload would silently discard local status edits; different-
-  // suite load would erase the in-progress view. Generate is the single
-  // path to mutate the on-screen suite. The check uses currentCases.length
-  // (not currentSuiteId) so the lock holds even if currentSuiteId drifts.
-  if (Array.isArray(currentCases) && currentCases.length > 0) {
-    toast("Generate new cases to load a different saved suite.");
-    return;
-  }
 
   // Backwards-compat: older history entries stored only the friendly engine
   // name ("Gemini"/"OpenAI"/"Demo"). Newer ones also store the raw key. Map
@@ -5307,13 +5204,6 @@ let isGenerating = false;
 function setGenerateBusy(busy) {
   isGenerating = busy;
   const btn = document.getElementById("btnGenerate");
-  // Re-render Recent so any already-open dropdown picks up the new lock
-  // state (rows + banner). Without this, a user who opens Recent BEFORE
-  // clicking Generate would still see the stale "unlocked" rows even
-  // after the in-flight call begins.
-  if (typeof renderHistoryDropdown === "function") {
-    try { renderHistoryDropdown(); } catch (_) { /* dropdown DOM may be torn down — non-fatal */ }
-  }
   if (!btn) return;
   btn.disabled = busy;
   btn.setAttribute("aria-busy", busy ? "true" : "false");
