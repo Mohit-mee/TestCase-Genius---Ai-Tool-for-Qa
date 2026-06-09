@@ -97,7 +97,7 @@ const routes = {
     const project = encodeURIComponent(body.project || "");
     const r = await jiraRequest({
       ...body, method: "GET",
-      path: `/rest/api/3/issue/createmeta?projectKeys=${project}&expand=projects.issuetypes`
+      path: `/rest/api/3/issue/createmeta?projectKeys=${project}&expand=projects.issuetypes.fields`
     });
     return r;
   },

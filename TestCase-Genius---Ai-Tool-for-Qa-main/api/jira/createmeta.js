@@ -18,7 +18,7 @@ module.exports = makeHandler({
     return jiraFetch({
       ...body,
       method: "GET",
-      path: `/rest/api/3/issue/createmeta?projectKeys=${project}&expand=projects.issuetypes`
+      path: `/rest/api/3/issue/createmeta?projectKeys=${project}&expand=projects.issuetypes.fields`
     });
   }
 });

@@ -610,8 +610,11 @@ Login form on a web app. Fields: email (required, valid format), password (requi
       </label>
     </div>
     <!-- Company-required "Panel / App" custom field. The dropdown picks the
-         value; the field-ID input maps it to the right Jira custom field
-         (e.g. customfield_10070). Leave the field ID blank to disable. -->
+         value; the "field" box takes the field's LABEL as shown in Jira (e.g.
+         "Panel/App") and the app auto-resolves the underlying custom-field id
+         at push time — so you don't need to know the id. Advanced users can
+         still paste a raw customfield_xxxxx id here instead. Leave blank to
+         disable the panel field entirely. -->
     <div class="grid grid-cols-2 gap-3 mt-3">
       <label class="text-xs block">
         <span class="block text-slate-600 mb-1">Panel / App <span class="text-slate-400 font-normal">(default)</span></span>
@@ -620,9 +623,9 @@ Login form on a web app. Fields: email (required, valid format), password (requi
         </select>
       </label>
       <label class="text-xs block">
-        <span class="block text-slate-600 mb-1">Panel Field ID <span class="text-slate-400 font-normal">(e.g. <code class="bg-slate-100 px-1 rounded">customfield_10070</code>)</span></span>
-        <input id="jiraPanelFieldInput" placeholder="customfield_xxxxx" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
-        <span class="text-[11px] text-slate-500 mt-1 block">Find it in Jira: <strong>Project settings → Issues → Fields</strong>, or in the field's admin URL. Leave blank to skip the panel field.</span>
+        <span class="block text-slate-600 mb-1">Panel Field Label <span class="text-slate-400 font-normal">(as shown in Jira)</span></span>
+        <input id="jiraPanelFieldInput" placeholder="Panel/App" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+        <span class="text-[11px] text-slate-500 mt-1 block">Type the field's <strong>name</strong> exactly as Jira shows it (e.g. <code class="bg-slate-100 px-1 rounded">Panel/App</code>). The app finds its id automatically. Advanced: you can paste a <code class="bg-slate-100 px-1 rounded">customfield_xxxxx</code> id instead. Leave blank to skip.</span>
       </label>
     </div>
     <button id="btnTestJira" class="mt-3 text-xs bg-sky-100 hover:bg-sky-200 text-sky-800 font-semibold px-3 py-2 rounded-lg">Test connection</button>
@@ -3198,7 +3201,16 @@ function jiraConfig() {
     assigneeAccountId:  (localStorage.getItem("tg_jiraAssigneeId")   || "").trim(),
     assigneeDisplayName:(localStorage.getItem("tg_jiraAssigneeName") || "").trim(),
     panel:        (localStorage.getItem("tg_jiraPanel")      || "").trim(),
-    panelFieldId: (localStorage.getItem("tg_jiraPanelField") || "").trim()
+    // `panelField` is what the user typed in Settings: either the field's
+    // human label (e.g. "Panel/App") OR a raw custom-field id. If it already
+    // looks like an id we use it directly; otherwise `panelFieldId` is left
+    // blank and resolved at push time by matching the label against Jira's
+    // createmeta field list (so users don't need to know the id).
+    panelField:   (localStorage.getItem("tg_jiraPanelField") || "").trim(),
+    panelFieldId: (function () {
+      const raw = (localStorage.getItem("tg_jiraPanelField") || "").trim();
+      return /^customfield_\d+$/i.test(raw) ? raw : "";
+    })()
   };
 }
 
@@ -3282,6 +3294,27 @@ function panelOptionTags(selected) {
     return `<option value="${escapeHtml(p)}"${sel}>${escapeHtml(p)}</option>`;
   }).join("");
   return blank + opts;
+}
+
+// Resolves the company Panel / App custom-field id by matching the configured
+// field LABEL (cfg.panelField) against the field definitions Jira returns in
+// createmeta. This is what lets users configure the field by name instead of
+// hunting for a "customfield_xxxxx" id. Returns { id, allowedValues } or null.
+function resolvePanelFieldFromMeta(projHit, cfg) {
+  if (!projHit || !cfg.panelField) return null;
+  const wanted = cfg.panelField.trim().toLowerCase().replace(/\s+/g, "");
+  const types = projHit.issuetypes || [];
+  const it = types.find(t => (t.name || "").toLowerCase() === (cfg.issueType || "").toLowerCase()) || types[0];
+  const fields = it && it.fields;
+  if (!fields) return null;
+  for (const key of Object.keys(fields)) {
+    const f = fields[key] || {};
+    const name = String(f.name || "").toLowerCase().replace(/\s+/g, "");
+    if (name && name === wanted) {
+      return { id: key, allowedValues: Array.isArray(f.allowedValues) ? f.allowedValues : [] };
+    }
+  }
+  return null;
 }
 
 // Maps TestCase Genius priority labels to standard Jira priority names. The
@@ -3541,7 +3574,7 @@ function friendlyJiraError(status, body) {
     case "project":    return "Project key not found OR you can't create issues there. Open an existing issue in Jira; its prefix (e.g. 'QA' in 'QA-123') is the Project Key.";
     case "issuetype":  return "Issue type not allowed in this project. Try 'Task' in Settings.";
     case "epic":       return "Parent Epic rejected — clear it or set a valid epic key from this same project.";
-    case "customfield":return "A custom field was rejected (e.g. Panel / App). Check the Panel Field ID in Settings is correct and the selected value matches an option configured on that Jira field. Details: " + joined.slice(0, 160);
+    case "customfield":return "A custom field was rejected (e.g. Panel / App). Check the Panel field label in Settings matches Jira exactly and the selected value is one of that field's options. Details: " + joined.slice(0, 160);
     case "summary":    return "Summary rejected: " + errs.summary;
     default:           return joined.slice(0, 220) || ("HTTP " + status);
   }
@@ -3639,7 +3672,7 @@ async function pushToJira() {
       <!-- Panel / App: company-required single-select. Shown whenever a panel
            field ID is configured in Settings; selection is enforced before
            pushing so the mandatory Jira field is always filled. -->
-      ${cfg.panelFieldId ? `
+      ${cfg.panelField ? `
       <label class="text-xs block" id="prePushPanelBlock">
         <span class="block text-slate-600 mb-1">Panel / App <span class="text-rose-500 font-normal">*required</span></span>
         <select id="prePushPanelInput" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">${panelOptionTags(cfg.panel)}</select>
@@ -3725,9 +3758,9 @@ async function pushToJira() {
         }
       }
 
-      // Panel / App is mandatory when a field ID is configured for the org.
+      // Panel / App is mandatory when a panel field is configured for the org.
       let newPanel = cfg.panel;
-      if (cfg.panelFieldId) {
+      if (cfg.panelField) {
         newPanel = ($("prePushPanelInput")?.value || "").trim();
         if (!newPanel) {
           toast("Select a Panel / App — it's required.");
@@ -4185,6 +4218,51 @@ node server.js</pre>
     if (!proceed) return;
     cfg.issueType = fallback;
     localStorage.setItem("tg_jiraIssueType", fallback);
+  }
+
+  // Resolve the company "Panel / App" field id from its label (skip when the
+  // user already supplied a raw customfield id, or no panel field is set). We
+  // need projHit's field metadata; if it's unavailable (proxy-404 fallback) we
+  // let the push proceed and let Jira surface any required-field error.
+  if (cfg.panelField && !cfg.panelFieldId && projHit) {
+    const resolved = resolvePanelFieldFromMeta(projHit, cfg);
+    if (resolved && resolved.id) {
+      cfg.panelFieldId = resolved.id;
+      // When Jira exposes the allowed options, make sure the selected value is
+      // one of them — a mismatch (e.g. casing or a renamed option) would be
+      // rejected on every create, so we stop early with the valid list.
+      if (cfg.panel && resolved.allowedValues.length) {
+        const match = resolved.allowedValues.find(v => String(v.value || "").toLowerCase() === cfg.panel.toLowerCase());
+        if (!match) {
+          const opts = resolved.allowedValues.map(v => v.value).filter(Boolean);
+          openPushModal("Panel value not accepted by Jira", `
+            <div class="bg-rose-50 border border-rose-200 rounded-lg p-3 text-sm text-rose-800 mb-3">
+              The selected panel <strong>${escapeHtml(cfg.panel)}</strong> isn't one of the options configured on the <strong>${escapeHtml(cfg.panelField)}</strong> field in Jira.
+            </div>
+            <p class="text-xs text-slate-700 mb-1"><strong>Valid options for this project:</strong></p>
+            <p class="text-xs text-slate-600">${opts.map(o => `<code class="bg-slate-100 px-1 rounded">${escapeHtml(o)}</code>`).join(" ") || "(none returned)"}</p>
+            <p class="text-[11px] text-slate-500 mt-2">Edit the <code class="bg-slate-100 px-1 rounded">JIRA_PANEL_OPTIONS</code> list to match these exactly, or pick a listed value when pushing.</p>
+          `, [{ label: "Close", onClick: closePushModal }]);
+          return;
+        }
+      }
+    } else {
+      // We have project metadata but no field matches the configured label.
+      openPushModal("Panel field not found in Jira", `
+        <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900 mb-3">
+          Couldn't find a field labelled <strong>${escapeHtml(cfg.panelField)}</strong> on the create screen for project <strong>${escapeHtml(cfg.project)}</strong> (issue type <strong>${escapeHtml(cfg.issueType)}</strong>).
+        </div>
+        <ul class="text-xs text-slate-600 list-disc pl-5 space-y-1">
+          <li>Check the spelling matches the field's label in Jira exactly.</li>
+          <li>Make sure the field is on the Create screen for this issue type.</li>
+          <li>Or paste the field's <code class="bg-slate-100 px-1 rounded">customfield_xxxxx</code> id in Settings instead.</li>
+        </ul>
+      `, [
+        { label: "Close", onClick: closePushModal },
+        { label: "Open Settings", primary: true, onClick: () => { closePushModal(); openSettings("jira"); } }
+      ]);
+      return;
+    }
   }
 
   const consolidated = isConsolidatedMode(cfg);
