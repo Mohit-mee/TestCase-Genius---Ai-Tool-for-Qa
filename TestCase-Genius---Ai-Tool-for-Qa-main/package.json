@@ -1,0 +1,12 @@
+{
+  "name": "testcase-genius",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-powered manual test case generator for QA teams. Static HTML + 5 tiny Vercel serverless functions that proxy Jira Cloud (which doesn't allow CORS from the browser).",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "proxy": "node server.js"
+  }
+}
